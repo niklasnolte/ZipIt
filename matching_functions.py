@@ -34,24 +34,24 @@ def add_bias_to_mats(mats):
 #####################################################################################################################################
 
 def match_tensors_zipit(
-    metric, r=.5, a=0.3, b=.125, 
-    print_merges=False, get_merge_value=False, add_bias=False, 
+    metric, r=.5, a=0.3, b=.125,
+    print_merges=False, get_merge_value=False, add_bias=False,
     **kwargs
 ):
     """
-    ZipIt! matching algorithm. Given metric dict, computes matching as defined in paper. 
+    ZipIt! matching algorithm. Given metric dict, computes matching as defined in paper.
     Args:
-    - metric: dictionary containing metrics. This must contain either a covariance or cossim matrix, and 
-        must be [(num_models x model_feature_dim), (num_models x model_feature_dim)]. 
+    - metric: dictionary containing metrics. This must contain either a covariance or cossim matrix, and
+        must be [(num_models x model_feature_dim), (num_models x model_feature_dim)].
     - r: Amount to reduce total input feature dimension - this is num_models x model_feature_dim. This function will
-        compute (un)merge matrix that goes from 
+        compute (un)merge matrix that goes from
         (num_models x model_feature_dim) -> (1-r)*(num_models x model_feature_dim) = merged_feature_dim.
-        E.g. if num_models=2, model_feature_dim=10 and r=.5, the matrix will map from 2x10=20 -> (1-.5)x2x10=10, or halve the 
+        E.g. if num_models=2, model_feature_dim=10 and r=.5, the matrix will map from 2x10=20 -> (1-.5)x2x10=10, or halve the
         collective feature space of the models.
-    - a: alpha hyperparameter as defined in Section 4.3 of our paper. 
+    - a: alpha hyperparameter as defined in Section 4.3 of our paper.
     - b: beta hyperparameter as defined in Section 4.3 of our paper.
     - print_merges: whether to print computed (un)merge matrices.
-    - get_merge_value default False, returns the sum of correlations over all the merges which the algorithm made. 
+    - get_merge_value default False, returns the sum of correlations over all the merges which the algorithm made.
     - add_bias: whether to add a bias to the input. This should only be used if your module expects the input with bias offset.
     returns:
     - (un)merge matrices
@@ -60,6 +60,8 @@ def match_tensors_zipit(
         sims = compute_correlation(metric["covariance"])
     elif "cossim" in metric:
         sims = metric["cossim"]
+    elif "correlation" in metric:
+        sims = metric["correlation"]
     O = sims.shape[0]
     remainder = int(O * (1-r) + 1e-4)
     permutation_matrix = torch.eye(O, O)#, device=sims.device)
@@ -82,30 +84,30 @@ def match_tensors_zipit(
         best_idx = sims.reshape(-1).argmax()
         row_idx = best_idx % sims.shape[1]
         col_idx = best_idx // sims.shape[1]
-        
+
         merge_value.append(permutation_matrix[row_idx, col_idx])
 
         if col_idx < row_idx:
             row_idx, col_idx = col_idx, row_idx
-        
+
         row_origin = original_model[row_idx]
         col_origin = original_model[col_idx]
-        
+
         permutation_matrix[:, row_idx] += permutation_matrix[:, col_idx]
         permutation_matrix = remove_col(permutation_matrix, col_idx)
-        
+
         sims[:, row_idx] = torch.minimum(sims[:, row_idx], sims[:, col_idx])
-        
+
         if 'magnitudes' in metric:
             metric['magnitudes'][row_idx] = torch.minimum(metric['magnitudes'][row_idx], metric['magnitudes'][col_idx])
             metric['magnitudes'] = remove_col(metric['magnitudes'][None], col_idx)[0]
-        
+
         if a <= 0:
             sims[row_origin*Om:(row_origin+1)*Om, row_idx] = -torch.inf
             sims[col_origin*Om:(col_origin+1)*Om, row_idx] = -torch.inf
         else: sims[:, row_idx] *= a
         sims = remove_col(sims, col_idx)
-        
+
         sims[row_idx, :] = torch.minimum(sims[row_idx, :], sims[col_idx, :])
         if a <= 0:
             sims[row_idx, row_origin*Om:(row_origin+1)*Om] = -torch.inf
@@ -115,7 +117,7 @@ def match_tensors_zipit(
 
         row_origin, col_origin = original_model[row_idx], original_model[col_idx]
         original_model = remove_col(original_model[None, :], col_idx)[0]
-        
+
         if row_origin == col_origin:
             origin = original_model[row_idx].item()
             budget[origin] -= 1
@@ -124,7 +126,7 @@ def match_tensors_zipit(
                 # kill origin
                 selector = original_model == origin
                 sims[selector[:, None] & selector[None, :]] = -torch.inf
-    
+
     if add_bias:
         unmerge_mats = permutation_matrix.chunk(num_models, dim=0)
         unmerge_mats = add_bias_to_mats(unmerge_mats)
@@ -136,18 +138,18 @@ def match_tensors_zipit(
     if print_merges:
         O, half_O = unmerge.shape
         A_merge, B_merge = unmerge.chunk(2, dim=0)
-        
+
         A_sums = A_merge.sum(0)
         B_sums = B_merge.sum(0)
-        
+
         A_only = (B_sums == 0).sum()
         B_only = (A_sums == 0).sum()
-        
+
         overlaps = half_O - (A_only + B_only)
-        
+
         print(f'A into A: {A_only} | B into B: {B_only} | A into B: {overlaps}')
         print(f'Average Connections: {unmerge.sum(0).mean()}')
-    
+
     merge = merge.to(sims.device)
     unmerge = unmerge.to(sims.device)
     if get_merge_value:
@@ -157,8 +159,8 @@ def match_tensors_zipit(
 
 
 def match_tensors_optimal(metric, r=.5, add_bias=False, **kwargs):
-    """ 
-    Apply optimal algorithm to compute matching. 
+    """
+    Apply optimal algorithm to compute matching.
     Hyperparameters and return are as defined in match_tensors_zipit.
     """
     correlation = metric["covariance"]
@@ -183,8 +185,8 @@ def match_tensors_optimal(metric, r=.5, add_bias=False, **kwargs):
 
 def match_tensors_permute(metric, r=.5, get_merge_value=False, add_bias=False, **kwargs):
     """
-    Matches arbitrary models by permuting all to the space of the first in your graph list. 
-    Mimics Rebasin methods. 
+    Matches arbitrary models by permuting all to the space of the first in your graph list.
+    Mimics Rebasin methods.
     Hyperparameters and return are as defined in match_tensors_zipit.
     """
     correlation = compute_correlation(metric["covariance"])
@@ -193,7 +195,7 @@ def match_tensors_permute(metric, r=.5, get_merge_value=False, add_bias=False, *
     N = int(1/(1 - r) + 0.5)
     Om = O // N
     device = correlation.device
-    
+
     mats = [torch.eye(Om, device=device)]
     # mats = [torch.zeros(Om, Om, device=device)]
     for i in range(1, N):
@@ -203,7 +205,7 @@ def match_tensors_permute(metric, r=.5, get_merge_value=False, add_bias=False, *
         except:
             pdb.set_trace()
         mats.append(torch.eye(Om, device=device)[torch.tensor(col_ind).long().to(device)].T)
-    
+
     if add_bias:
         unmerge_mats = add_bias_to_mats(mats)
     else:
@@ -219,8 +221,8 @@ def match_tensors_permute(metric, r=.5, get_merge_value=False, add_bias=False, *
 
 
 def match_tensors_identity(metric, r=.5, add_bias=False, **kwargs):
-    """ 
-    Match feature spaces from different models by weight averaging.  
+    """
+    Match feature spaces from different models by weight averaging.
     Hyperparameters and return are as defined in match_tensors_zipit.
     """
     correlation = metric["covariance"]
@@ -229,9 +231,9 @@ def match_tensors_identity(metric, r=.5, add_bias=False, **kwargs):
     N = int(1/(1 - r) + 0.5)
     Om = O // N
     device = correlation.device
-    
+
     mats = [torch.eye(Om, device=device) for _ in range(N)]
-    
+
     if add_bias:
         unmerge_mats = add_bias_to_mats(mats)
     else:
@@ -262,7 +264,7 @@ def match_tensors_kmeans(metric, r=.5):
     matches = torch.zeros((O, bound), device=correlation.device)
     for model_idx, match_idx in enumerate(cluster_labels):
         matches[model_idx, match_idx] = 1
-    
+
     merge = matches / (matches.sum(dim=0, keepdim=True) + 1e-5)
     unmerge = matches
     return merge.T, unmerge
@@ -275,7 +277,7 @@ def match_tensors_kmeans(metric, r=.5):
 def match_tensors_return_a(metric, r=.5, add_bias=False, **kwargs):
     """
     Matches feature spaces from different models by returning only the first.
-    Mainly used for debugging purposes. 
+    Mainly used for debugging purposes.
     Hyperparameters and return are as defined in match_tensors_zipit.
     """
     correlation = metric["covariance"]
@@ -290,8 +292,8 @@ def match_tensors_return_a(metric, r=.5, add_bias=False, **kwargs):
 
 def match_tensors_randperm(metric, r=.5, **kwargs):
     """
-    Matches feature spaces from different models by randomly permuting the 
-    space of one onto another. 
+    Matches feature spaces from different models by randomly permuting the
+    space of one onto another.
     Mainly used for debugging.
     Hyperparameters and return are as defined in match_tensors_zipit.
     """

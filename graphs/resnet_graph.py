@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 import torchvision.models.resnet as resnet
 import models.resnets as resnet2
+from metric_calculators import CossimMetric, CovarianceMetric, CorrelationMetric, MeanMetric
 
 from model_merger import ModelMerge
 from matching_functions import match_tensors_identity, match_tensors_zipit
@@ -300,7 +301,7 @@ if __name__ == '__main__':
         graph2 = resnet18(deepcopy(models[1])).graphify()
 
         merge = ModelMerge(graph1, graph2, device=args.device)
-        merge.transform(deepcopy(models[0]).eval(), train_loaders[0], transform_fn=match_tensors_zipit)
+        merge.transform(deepcopy(models[0]).eval(), train_loaders[0], transform_fn=match_tensors_zipit, metric_classes=(CorrelationMetric, MeanMetric))
         models.append(merge.merged_model)
 
         for i in torch.linspace(0.25, 0.75, 3):
