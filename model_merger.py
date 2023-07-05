@@ -3,7 +3,6 @@ from copy import deepcopy
 import pdb
 import torch
 from torch import nn
-from fvcore.nn.flop_count import flop_count
 from graphs.base_graph import NodeType
 from metric_calculators import CovarianceMetric, MeanMetric
 from matching_functions import match_tensors_zipit
@@ -13,8 +12,8 @@ from utils import get_merging_fn
 
 
 class MergeHandler:
-    """ 
-    Handles all (un)merge transformations on top of a graph architecture. merge/unmerge is a dict whose 
+    """
+    Handles all (un)merge transformations on top of a graph architecture. merge/unmerge is a dict whose
     keys are graph nodes and values are merges/unmerges to be applied at the graph node.
     """
     def __init__(self, graph, merge, unmerge):
@@ -38,7 +37,7 @@ class MergeHandler:
 
         self.merge = merge
         self.unmerge = unmerge
-    
+
     def handle_batchnorm2d(self, forward, node, module):
         """ Apply (un)merge operation to batchnorm parameters. """
         if forward:
@@ -48,13 +47,13 @@ class MergeHandler:
                 parameter = getattr(module, parameter_name)
                 merge = self.merge if parameter_name != 'running_var' else self.merge # ** 2
                 parameter.data = merge @ parameter
-            
+
             for succ in self.graph.succs(node):
                 self.prop_forward(succ)
         else:
             assert len(self.graph.preds(node)) == 1, 'BN expects one predecessor'
             self.prop_back(self.graph.preds(node)[0])
-    
+
     def handle_layernorm(self, forward, node, module):
         """ Apply (un)merge operation to layernorm parameters. """
         if forward:
@@ -63,7 +62,7 @@ class MergeHandler:
             for parameter_name in parameter_names:
                 parameter = getattr(module, parameter_name)
                 parameter.data = self.merge @ parameter
-            
+
             for succ in self.graph.succs(node):
                 self.prop_forward(succ)
         else:
@@ -93,7 +92,7 @@ class MergeHandler:
                 pdb.set_trace()
             if hasattr(module, 'bias') and module.bias is not None:
                 module.bias.data = self.merge @ module.bias
-    
+
     def handle_linear(self, forward, node, module):
         """ Apply (un)merge operation to linear layer parameters. """
         if forward: # unmerge
@@ -119,13 +118,13 @@ class MergeHandler:
         """ Propogate (un)merge metrics backwards through a node graph. """
         if node in self.graph.merged:
             return
-        
+
         info = self.graph.get_node_info(node)
         self.graph.merged.add(node)
-        
+
         for succ in self.graph.succs(node):
             self.prop_forward(succ)
-        
+
         if info['type'] in (NodeType.OUTPUT, NodeType.INPUT):
             raise RuntimeError(f'Unexpectedly reached node type {info["type"]} when merging.')
         elif info['type'] == NodeType.CONCAT:
@@ -146,15 +145,15 @@ class MergeHandler:
             # Default case (also for SUM)
             for pred in self.graph.preds(node):
                 self.prop_back(pred)
-    
+
     def prop_forward(self, node):
         """ Propogate (un)merge transformations up a network graph. """
         if node in self.graph.unmerged:
             return
-        
+
         info = self.graph.get_node_info(node)
         self.graph.unmerged.add(node)
-        
+
         if info['type'] in (NodeType.OUTPUT, NodeType.INPUT):
             raise RuntimeError(f'Unexpectedly reached node type {info["type"]} when unmerging.')
         elif info['type'] == NodeType.MODULE:
@@ -172,7 +171,7 @@ class MergeHandler:
             if node not in self.graph.working_info:
                 self.graph.working_info[node] = []
             self.graph.working_info[node].append(self.unmerge)
-            
+
             if len(self.graph.working_info[node]) < num_to_concat:
                 # haven't collected all the info yet, don't finish the unmerge
                 self.graph.unmerged.remove(node)
@@ -185,7 +184,7 @@ class MergeHandler:
                 new_handler = MergeHandler(self.graph, self.merge, unmerge)
                 for succ in self.graph.succs(node):
                     new_handler.prop_forward(succ)
-                
+
 
 
 
@@ -198,12 +197,12 @@ class MergedModelStop(Exception):
 
 class ModelMerge(nn.Module):
     """
-    Handles all merge operations for zipping arbitrary numbers of models. 
+    Handles all merge operations for zipping arbitrary numbers of models.
     Expects a list of architecture graphs (one per model) (See graphs/base_graphs.py)).
     """
     def __init__(self, *graphs, device=0):
         super().__init__()
-        
+
         self.stop_at = None
         self.start_at = None
         self.stop_at_ptr = [None]
@@ -238,10 +237,10 @@ class ModelMerge(nn.Module):
         - dataloader: pytorch dataloader. Dataset (or list of datasets) over which to compute metrics
         - metric_classes: dictionary whose keys are metric types, and values are metric functions.
             This function will compute metrics for all kinds in metric_classes, using the dataloader.
-        
+
         This function performs a forward pass over the dataset, aggregating all intermediate representations
-        among all hooks in a graph model. These are then combined to calculate metrics.    
-        
+        among all hooks in a graph model. These are then combined to calculate metrics.
+
         Returns: dictionary of graph nodes to metrics computed at those nodes in the model graph.
         """
         self.metrics = None
@@ -249,75 +248,75 @@ class ModelMerge(nn.Module):
             dataloader_list = [dataloader]
         else:
             dataloader_list = dataloader
-        
+
         numel = 0
         for dataloader in dataloader_list:
             for x, _ in tqdm(dataloader, desc="Forward Pass to Compute Merge Metrics: "):
                 x = x.to(self.device)
-                
+
                 numel += x.shape[0]
                 intermediates = [g.compute_intermediates(x) for g in self.graphs]
                 nodes = list(intermediates[0].keys())
                 if self.metrics is None:
                     self.metrics = {n: {k: v() for k, v in metric_classes.items()} for n in nodes}
-                
+
                 for node, node_metrics in self.metrics.items():
                     for metric in node_metrics.values():
                         intermeds_float = [i[node].float() for i in intermediates]
                         metric.update(x.shape[0], *intermeds_float)
-        
+
         for node, node_metrics in self.metrics.items():
             for metric_name, metric in node_metrics.items():
                 self.metrics[node][metric_name] = metric.finalize(numel)
 
         return self.metrics
-    
+
     def compute_transformations(self, transform_fn, reduce_ratio=.5, **kwargs):
         """
-        Transforms graph models according to a transform function (transform_fn) using the alignment 
-        metrics provided by self.metrics. Will transform the feature spaces at each PREFIX and POSTFIX 
-        node between all models. The objective of this operation is to map all dispirate feature spaces 
-        in each model graph to a common one such that all distinct spaces collectively map to a single 
+        Transforms graph models according to a transform function (transform_fn) using the alignment
+        metrics provided by self.metrics. Will transform the feature spaces at each PREFIX and POSTFIX
+        node between all models. The objective of this operation is to map all dispirate feature spaces
+        in each model graph to a common one such that all distinct spaces collectively map to a single
         space of dimension (1 - reduce_ratio) * sum(graph1_feat_dim + graph2_feat_dim + ... + graphN_feat_dim)
         - transform_fn: transformation function (e.g., permutation - match_tensors_permute)
         - reduce_ratio: desired reduction proportion from total of all graph model feature dimensions
         - kwargs: hyperparameters associated with transform_fn. E.g., alpha and beta for ZipIt!
-        Returns: A dictionay for transform operations to be performed at every point defined by PREFIX and POSTFIX, 
+        Returns: A dictionay for transform operations to be performed at every point defined by PREFIX and POSTFIX,
         on all graph models.
         """
         start_time = time()
         self.merges = {}
         self.unmerges = {}
-        
+
         nodes = list(self.metrics.keys())
         nodes.sort()
 
         for node in tqdm(nodes, desc="Computing transformations: "):
             if self.start_at is None or node >= self.start_at:
                 metric = self.metrics[node]
-                # Maybe merge differently 
+                # Maybe merge differently
                 info = self.graphs[0].get_node_info(node)
                 if info['special_merge'] is not None:
                     merge, unmerge = get_merging_fn(info['special_merge'])(metric, reduce_ratio, **kwargs)
                 else:
                     merge, unmerge = transform_fn(metric, reduce_ratio, **kwargs)
-                
+
                 # TODO: check if better way to do hack
                 merge = merge * len(self.graphs) # Hack to deal with things not merged
-                
+
                 self.merges[node] = merge.chunk(len(self.graphs), dim=1)
                 self.unmerges[node] = unmerge.chunk(len(self.graphs), dim=0)
-                
+
                 if self.stop_at is not None and node == self.stop_at:
                     break
-        
+
         self.compute_transform_time = time() - start_time
         return self.merges, self.unmerges
-    
+
     def apply_transformations(self):
         """
-        Applys transformations found by compute_transformations from start_at up to stop_at graph node location 
-        on all graph models. 
+        Applys transformations found by compute_transformations from start_at up to stop_at graph node location
+        on all graph models.
         """
         for node in self.merges:
             merges = self.merges[node]
@@ -325,14 +324,14 @@ class ModelMerge(nn.Module):
             for merge, unmerge, graph in zip(merges, unmerges, self.graphs):
                 merger = MergeHandler(graph, merge, unmerge)
                 merger.prop_back(node)
-        
+
     def get_merged_state_dict(self, interp_w=None):
         """
-        Post transformations, obtain state dictionary for merged model by linearly interpolating between 
-        transformed models in each graph. By default all parameters are averaged, but if given an interp_w 
+        Post transformations, obtain state dictionary for merged model by linearly interpolating between
+        transformed models in each graph. By default all parameters are averaged, but if given an interp_w
         weight, will be weightedly averaged instead.
-        - interp_w (Optional): If None, all parameters of each model is averaged for merge. Otherwise, 
-        interp_w is a list of len(num_models_to_merge), with weights bearing the importance of incorporating 
+        - interp_w (Optional): If None, all parameters of each model is averaged for merge. Otherwise,
+        interp_w is a list of len(num_models_to_merge), with weights bearing the importance of incorporating
         features from each model into the merged result.
         Returns: state dict of merged model.
         """
@@ -353,12 +352,12 @@ class ModelMerge(nn.Module):
             if 'size' not in str(e):
                 raise e
         return state_dict
-    
-    
+
+
     def add_prop_hook(self, model, node, pre=False, stop=False, loc=None, loc_idx=0, tmp_dict=None, tmp_dict_size=1):
         """
-        Helper used for partial zipping. Add forward propogation hooks to grab intermediate outputs wherever partial zipping starts/stops. 
-        These iintermediate outputs of each base model/merged model respectively will then be passed to the merged model/base models 
+        Helper used for partial zipping. Add forward propogation hooks to grab intermediate outputs wherever partial zipping starts/stops.
+        These iintermediate outputs of each base model/merged model respectively will then be passed to the merged model/base models
         respectivelty.
         """
         info = self.graphs[0].get_node_info(node)
@@ -391,15 +390,15 @@ class ModelMerge(nn.Module):
 
     def has_weight_matrix(self, node):
         """ Whether a graph node has an associated weight matrix (i.e., whether it has parameters needing to be transformed). """
-        
-        
+
+
         info = self.graphs[0].get_node_info(node)
 
         if info['type'] == NodeType.MODULE:
             _cls = self.graphs[0].get_module(info['layer']).__class__.__name__
             if _cls in ('Linear', 'Conv2d', 'Conv1d', 'Conv3d', 'SpaceInterceptor'):
                 return True
-        
+
         return False
 
     def add_unmerge_hooks(self, model_stop, models_start, loc):
@@ -411,7 +410,7 @@ class ModelMerge(nn.Module):
                  node not in graph.merged
                  and node in graph.unmerged
                  and self.has_weight_matrix(node)]
-        
+
         for idx, node in enumerate(nodes):
             self.add_prop_hook(model_stop, node, pre=True, stop=True, loc_idx=0, tmp_dict=tmp_dict, tmp_dict_size=1)
             for model in models_start:
@@ -438,8 +437,8 @@ class ModelMerge(nn.Module):
             g.clear_hooks()
         for hook in self.hooks:
             hook.remove()
-        self.hooks = []      
-            
+        self.hooks = []
+
     def transform(self, model,
                   dataloader,
                   metric_classes=(CovarianceMetric, MeanMetric),
@@ -450,18 +449,18 @@ class ModelMerge(nn.Module):
                   **transform_kwargs
                   ):
         """ Note: this consumes the models given to the graphs. Do not modify the models you give this. """
-        
+
         self.stop_at = stop_at
         self.start_at = start_at
         self.merged_model = model.to(self.device)
-        
+
         if not isinstance(metric_classes, dict):
             metric_classes = { x.name: x for x in metric_classes }
-        
+
         self.metric_classes = metric_classes
         self.transform_fn = transform_fn
         self.prune_threshold = prune_threshold
-        
+
         self.compute_metrics(dataloader, metric_classes=metric_classes)
         self.compute_transformations(transform_fn,
                                     reduce_ratio=1 - 1. / len(self.graphs),
@@ -469,16 +468,16 @@ class ModelMerge(nn.Module):
                                     **transform_kwargs
                                     )
         self.apply_transformations()
-        
+
         self.merged_model.load_state_dict(self.get_merged_state_dict(), strict=False)
-        
+
         self.add_hooks()
-    
+
     def add_hooks(self):
         """ Add hooks at zip start or stop at locations for merged model and base models. """
         # Remove the hooks from the models to add or own
         self.clear_hooks()
-        
+
         if self.stop_at is not None:
             self.add_unmerge_hooks(self.merged_model, self.head_models, self.stop_at_ptr)
         if self.start_at is not None:
@@ -525,12 +524,12 @@ class ModelMerge(nn.Module):
                     for k, v in e.x.items():
                         start_val[k] = start_val[k] + v
                     total += 1
-            
+
             self.start_at_ptr.clear()
             for k, v in start_val.items():
                 self.start_at_ptr[k] = v / total / len(self.graphs)
             x = x[0, None].detach()
-        
+
         try:
             return self.merged_model(x)
         except MergedModelStop as e:
@@ -542,12 +541,12 @@ class ModelMerge(nn.Module):
                 out.append(model(dummy_x))
 
             self.stop_at_ptr[0] = None
-            
+
             if cat_dim is not None:
                 out = torch.cat(out, dim=cat_dim)
-            
+
             return out
-    
+
     def compute_flops(self, model, input_size=(3, 224, 224), batch_size=1):
         """ Compute the flops of a given model in eval mode. """
         model = model.eval().to(self.device)
@@ -556,9 +555,9 @@ class ModelMerge(nn.Module):
 
         count_dict1, *_ = flop_count(model, input1)
         count1 = sum(count_dict1.values())
-            
+
         return count1
-    
+
     def compute_forward_flops(self, input_size=(3, 224, 224), cat_dim=None, start_idx=None):
         """ Evaluate the combined model. """
         # Note: does not support start_at yet
@@ -571,7 +570,7 @@ class ModelMerge(nn.Module):
                 self.merged_model(dummy)
             except MergedModelStop as e:
                 self.stop_at_ptr[0] = e.x[0]
-            
+
                 # 1 base model
                 self.clear_hooks()
                 flops = self.compute_flops(self.graphs[0].model, input_size=input_size, batch_size=1)

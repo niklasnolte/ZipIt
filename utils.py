@@ -14,11 +14,9 @@ from sklearn.model_selection import train_test_split
 from torch.cuda.amp import autocast, GradScaler
 from torch.nn import CrossEntropyLoss
 from torch.optim import SGD, Adam, lr_scheduler
-from fvcore.nn.flop_count import flop_count
 from inspect import getmembers, isfunction
 from metric_calculators import get_metric_fns
 import torch.nn.functional as F
-import clip
 import einops
 import torch
 import scipy
@@ -34,47 +32,47 @@ CONCEPT_TASKS  = list(string.ascii_uppercase)
 
 class SpaceInterceptor(nn.Module):
     '''
-    This module is meant to intercept computational flows between any given two layers. 
-    Inserting the module between two layers allows us to compute a merge/unmerge on each 
+    This module is meant to intercept computational flows between any given two layers.
+    Inserting the module between two layers allows us to compute a merge/unmerge on each
     layer separately, rather than a single merge/unmerge for both. This is most useful for
-    controlling the transformations learned over residual connections. E.g., if we have a 
-    case where we combine several residuals together, we can instead place this on each 
+    controlling the transformations learned over residual connections. E.g., if we have a
+    case where we combine several residuals together, we can instead place this on each
     branch before their connection, allowing us to learn distinct merge/unmerges on each
     branch, and 1 merge/unmerge on the connection, rather than 1 merge/unmerge for everything.
     Thus, it allows for (hopefully) more specificity.
-    
+
     All it requires is a dimension parameter (the size of the feature dimension).
-    
+
     It contains only 1 weight, which begins as the identity, and will be transformed according to
     the unmerge/merge that will be applied over it. For all intents and purposes, this is treated
-    as a linear layer, with not bias! 
+    as a linear layer, with not bias!
     '''
     def __init__(self, dim):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.eye(dim))
-    
+
     def forward(self, input, kind='linear'):
         if kind == 'conv':
             input = input.permute(0, 2,3, 1)
-        
+
         output = input @ self.weight.T
-        
+
         if kind == 'conv':
             output = output.permute(0, 3, 1, 2)
-        
+
         return output
-    
+
 
 class SpoofModel(torch.nn.Module):
     """wrap model, allow for multiple forward passes at once."""
     def __init__(self, models):
         super().__init__()
         self.models = models
-        
+
     def forward(self, x):
         """Call all models returning list of their outputs."""
         return [model(x) for model in self.models]
-    
+
     def parameters(self):
         """Return list of parameters from first model."""
         return self.models[0].parameters()
@@ -84,7 +82,7 @@ class DummyDataset:
     """ Dummy dataset to provide the length. """
     def __init__(self, len):
         self.len = len
-    
+
     def __len__(self):
         return self.len
 
@@ -99,7 +97,7 @@ class FractionalDataloader:
         self.dataloader = dataloader
         self.dataset = self.dataloader.dataset
         self.seed = seed
-    
+
     def __iter__(self):
         cur_elems = 0
         if self.seed is not None:
@@ -115,8 +113,8 @@ class FractionalDataloader:
                 yield x, y
             except StopIteration:
                 it = iter(self.dataloader)
-                
-        
+
+
     def __len__(self):
         return self.num_batches
 
@@ -127,10 +125,10 @@ class SpoofLoader(object):
         super().__init__()
         self.dataloaders = dataloaders
         self.dataset = DummyDataset(min(len(dataloader.dataset) for dataloader in dataloaders))
-    
+
     def __len__(self):
         return len(self.dataset)
-    
+
     def __iter__(self):
         """Iterate over all dataloaders getting the images and labels in a concatenated form."""
         num_loaders = len(self.dataloaders)
@@ -169,7 +167,7 @@ class EarlyStopper:
 
 def evaluate_cliphead_alltasks(model, loader, label_encodings_list, splits, num_classes):
     """Evaluate a cliphead on all tasks. Return acc_overall, acc_avg, perclass_acc
-    
+
     Args:
         model: cliphead model
         loader: dataloader to evaluate on
@@ -186,12 +184,12 @@ def evaluate_cliphead_alltasks(model, loader, label_encodings_list, splits, num_
     device = get_device(model)
     correct = 0
     total = 0
-    
+
     all_splits = torch.tensor(sum(splits, [])).to(device)
     splits = [list(split) for split in splits]
     totals = [0] * num_classes
     corrects = [0] * num_classes
-    
+
     task_map = {}
     for i, split in enumerate(splits):
         for _cls in split:
@@ -219,13 +217,13 @@ def evaluate_cliphead_alltasks(model, loader, label_encodings_list, splits, num_
                 all_logits = torch.bmm(encodings, label_encodings.transpose(-1, -2)).transpose(1, 0)
             else:
                 all_logits = torch.einsum('be,sec->bsc', encodings, label_encodings.transpose(-1, -2))
-            
+
             if multihead:
                 all_logits = F.softmax(all_logits * 100, dim=-1)
             task_preds = all_logits[range(batch_size), task_idx, :].argmax(-1)
             task_preds = task_splits.gather(dim=-1, index=task_preds[:, None])[:, 0]
             all_preds = all_logits.flatten(1)[:, all_splits.argsort()].argmax(-1)
-            
+
             for gt, task_p, all_p in zip(labels, task_preds, all_preds):
                 totals[gt] += 1
                 if gt == task_p:
@@ -243,14 +241,14 @@ def evaluate_cliphead_alltasks(model, loader, label_encodings_list, splits, num_
             split_accs[i] /= max(split_total, 1e-4)
 
         return correct / total, sum(split_accs) / len(split_accs), split_accs
-            
+
 
 # evaluates accuracy
 def evaluate_cliphead(
-    model, loader, class_vectors, remap_class_idxs=None, 
+    model, loader, class_vectors, remap_class_idxs=None,
     return_confusion=False, task_info=None, return_loss=False):
     """Evaluate a model with a cliphead on a dataset.
-    
+
     Args:
         model: cliphead model
         loader: dataloader to evaluate on
@@ -268,7 +266,7 @@ def evaluate_cliphead(
     model.eval()
     correct = 0
     total = 0
-    
+
     totals = np.array([0] * class_vectors.shape[0])
     corrects = np.array([0] * class_vectors.shape[0])
 
@@ -279,7 +277,7 @@ def evaluate_cliphead(
         for inputs, labels in tqdm(loader, 'Evaluating CLIP head model'):
             encodings = model(inputs.to(device))
             normed_encodings = encodings / encodings.norm(dim=-1, keepdim=True)
-            
+
             if task_info is not None:
                 task_map = task_info['task_map']
                 data_label_task = task_map[labels].to(device)
@@ -302,17 +300,17 @@ def evaluate_cliphead(
                     gt = remap_class_idxs[gt]
                 else:
                     idx = gt
-                
+
                 is_correct = (gt == p).item()
                 correct += is_correct
-                
-                 
+
+
                 if return_confusion:
                     totals[idx] += 1
                     corrects[idx] += is_correct
-                    
+
             total += inputs.shape[0]
-    
+
     overall_loss = np.mean(losses)
 
     if return_confusion:
@@ -321,11 +319,11 @@ def evaluate_cliphead(
         if return_loss:
             return correct / total, overall_loss
         return correct / total
-    
+
 
 def train_cliphead(model, train_loader, test_loader, class_vectors, remap_class_idxs=None, epochs=200):
     """Train a cliphead model.
-    
+
     Args:
         model: cliphead model
         train_loader: dataloader to train on
@@ -346,7 +344,7 @@ def train_cliphead(model, train_loader, test_loader, class_vectors, remap_class_
     loss_fn = CrossEntropyLoss()
 
     device = get_device(model)
-    
+
     losses = []
     acc = 0.
     pbar = tqdm(range(epochs), desc=f'finetuning, prev acc: {acc}: ')
@@ -369,7 +367,7 @@ def train_cliphead(model, train_loader, test_loader, class_vectors, remap_class_
             scaler.update()
             scheduler.step()
             losses.append(loss.item())
-            
+
         acc = evaluate_cliphead(model, test_loader, class_vectors=class_vectors, remap_class_idxs=remap_class_idxs)
         pbar.set_description(f'finetuning, prev acc: {acc}: ')
         print(f'Epoch {_}, Acc: {acc}')
@@ -381,7 +379,7 @@ def evaluate_logits_alltasks(model, loader, splits, num_classes):
     model.eval()
     correct = 0
     total = 0
-    
+
     splits = [list(split) for split in splits]
 
     totals = [0] * num_classes
@@ -395,7 +393,7 @@ def evaluate_logits_alltasks(model, loader, splits, num_classes):
     for i, split in enumerate(splits):
         for _cls in split:
             task_map[_cls] = i
-    
+
     task_map = [task_map[_cls] if _cls in task_map else -1 for _cls in range(num_classes)]
     task_map = torch.tensor(task_map).to(device)
 
@@ -404,7 +402,7 @@ def evaluate_logits_alltasks(model, loader, splits, num_classes):
     with torch.no_grad(), autocast():
         for inputs, labels in tqdm(loader, 'Evaluating multihead head model'):
             inputs, labels = inputs.to(device), labels.to(device)
-            
+
             class_selector = torch.isin(labels, all_splits)
             inputs, labels = inputs[class_selector, :, :, :], labels[class_selector]
 
@@ -436,12 +434,12 @@ def evaluate_logits_alltasks(model, loader, splits, num_classes):
 
             for gt, p, p2 in zip(labels, outputs, outputs2):
                 totals[gt] += 1
-                
+
                 if gt == p:
                     corrects[gt] += 1
                 if gt == p2:
                     correct += 1
-                
+
                 total += 1
 
     split_accs = [0] * len(splits)
@@ -452,7 +450,7 @@ def evaluate_logits_alltasks(model, loader, splits, num_classes):
             split_accs[i] += corrects[_cls]
             split_total += totals[_cls]
         split_accs[i] /= max(split_total, 1e-4)
-                
+
     return correct / total, sum(split_accs) / len(split_accs), split_accs
 
 
@@ -473,24 +471,24 @@ def evaluate_logits_i(model, loader, head_index, num_classes, return_confusion=F
             batch_size = inputs.shape[0]
             if batch_size == 0:
                 continue
-            
+
             logits = model(inputs)[head_index].argmax(-1)
             for gt, p in zip(labels, logits):
                 try:
                     totals[gt] += 1
                 except:
                     pdb.set_trace()
-                
+
                 if gt == p:
                     correct += 1
                     corrects[gt] += 1
-                
+
                 total += 1
     if return_confusion:
         return correct / sum(totals), list(map(lambda a: a[0] / max(a[1], 1e-4), zip(corrects, totals)))
     else:
         return correct / total
-    
+
 
 def train_logits(model, train_loader, test_loader, epochs=200, remap_class_idxs=None):
     optimizer = torch.optim.Adam(params=model.parameters(), lr=0.008)
@@ -498,7 +496,7 @@ def train_logits(model, train_loader, test_loader, epochs=200, remap_class_idxs=
     # scheduler = lr_scheduler.LinearLR(optimizer, min_lr=.0000001, verbose=True, factor=np.sqrt(.1), cooldown=0.)
     scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1, end_factor=1e-7, total_iters=ne_iters)
     early_stopper = EarlyStopper(patience=epochs, min_delta=.0001)
-    
+
     scaler = GradScaler()
     loss_fn = CrossEntropyLoss(reduction='mean')
     device = get_device(model)
@@ -518,7 +516,7 @@ def train_logits(model, train_loader, test_loader, epochs=200, remap_class_idxs=
                     remapped_labels = remap_class_idxs[labels].to(device)
                 else:
                     remapped_labels = labels.to(device)
-                    
+
                 loss = loss_fn(logits, remapped_labels)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -531,7 +529,7 @@ def train_logits(model, train_loader, test_loader, epochs=200, remap_class_idxs=
             best_sd = model.state_dict()
             best_acc = acc
             best_epoch = epoch
-            
+
         if early_stopper.early_stop(acc):
             print(f'Stopping at Epoch: {epoch}. Best Accuracy {best_acc}, Achieved at Epoch {best_epoch}')
             break
@@ -559,10 +557,10 @@ def evaluate_logits(model, test_loader, return_confusion=False, use_flip_aug=Fal
             outputs = model(inputs)
             if use_flip_aug:
                 outputs += model(torch.flip(inputs, (3,)))
-            
+
             if eval_mask is not None:
                 outputs[:, eval_mask == 0] = -torch.inf
-            
+
             pred = outputs.argmax(dim=-1)
             # pdb.set_trace()
             total += pred.shape[0]
@@ -585,7 +583,7 @@ def evaluate_logits(model, test_loader, return_confusion=False, use_flip_aug=Fal
     totals = [totals[i] for i in range(num_classes)]
     corrects = [corrects[i] for i in range(num_classes)]
     total_loss = total_loss / total_iter
-    
+
     if return_confusion:
         return correct / sum(totals), list(map(lambda a: a[0] / a[1], zip(corrects, totals)))
     else:
@@ -600,22 +598,22 @@ def evaluate_model(eval_type, model, config, **opt_kwargs):
     else:
         loader = config['data']['test']['full']
         num_classes = len(config['data']['test']['class_names'])
-        
-    if eval_type == 'logits':    
+
+    if eval_type == 'logits':
         acc_overall, acc_avg, perclass_acc = evaluate_logits_alltasks(
-            model, loader, 
-            splits=config['dataset']['class_splits'], 
+            model, loader,
+            splits=config['dataset']['class_splits'],
             num_classes=num_classes
         )
-        
+
     elif eval_type == 'clip':
         clip_features = load_clip_features(config['data']['test']['class_names'], get_device(model))
         class_vectors = [clip_features[split] for split in config['data']['train']['class_splits']]
 
         acc_overall, acc_avg, perclass_acc = evaluate_cliphead_alltasks(
-            model, 
-            loader, 
-            class_vectors, config['data']['train']['class_splits'], 
+            model,
+            loader,
+            class_vectors, config['data']['train']['class_splits'],
             num_classes=num_classes
         )
     else:
@@ -636,9 +634,9 @@ def prepare_data(config, device='cuda'):
     """ Load all dataloaders required for experiment. """
     if isinstance(config, list):
         return [prepare_data(c, device) for c in config]
-    
+
     dataset_name = config['name']
-    
+
     import datasets.configs as config_module
     data_config = deepcopy(getattr(config_module, dataset_name))
     data_config.update(config)
@@ -669,7 +667,7 @@ def prepare_data(config, device='cuda'):
         test_loaders = prepare_test_loaders(data_config)
     else:
         raise NotImplementedError(config['type'])
-    
+
     if 'train_fraction' in data_config:
         for k, v in dict(train_loaders.items()).items():
             if k == 'splits':
@@ -703,11 +701,11 @@ def prepare_resnets(config, device):
         from torchvision.models import resnet18 as wrapper
     else:
         raise NotImplementedError(config['name'])
-    
+
     output_dim = config['output_dim']
     for base_path in tqdm(config['bases'], desc="Preparing Models"):
         base_sd = torch.load(base_path, map_location=torch.device(device))
-        
+
         # Remove module for dataparallel
         for k in list(base_sd.keys()):
             if k.startswith('module.'):
@@ -733,7 +731,7 @@ def prepare_singan(config, device):
         base_model = Sampler()
         base_model._init_eval(base_path, config['data_paths'][i], device)
         bases.append(base_model)
-        
+
     new_model = Sampler()
     new_model._init_eval(base_path, config['data_paths'][i], device) # this will be merged model.
 
@@ -756,10 +754,10 @@ def prepare_vgg(config, device):
         width = 1
     wrapper = lambda num_classes: wrapper_w(width, num_classes)
     output_dim = config['output_dim']
-    
+
     for base_path in tqdm(config['bases'], desc="Preparing Models"):
         base_sd = torch.load(base_path, map_location=torch.device(device))
-        
+
         base_model = wrapper(num_classes=output_dim).to(device)
         base_model.load_state_dict(base_sd)
         bases.append(base_model)
@@ -844,8 +842,8 @@ def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
-    
-        
+
+
 def convert_dict_to_tuple(d):
     """Convert a dictionary to a tuple of key-value pairs."""
     return tuple(list(d.items()))
@@ -875,11 +873,11 @@ def write_to_csv(results, csv_file):
         names = ','.join(keys)
         with open(csv_file, 'a') as f:
             f.write(f"{names}\n")
-    
+
     csv_line = ','.join([str(i) for i in results.values()])
     with open(csv_file, 'a') as f:
         f.write(f"{csv_line}\n")
-        
+
 
 def vector_gather(vectors, indices):
     """
@@ -990,7 +988,7 @@ def create_heldout_split(dataset, fraction):
     val_set = dataset.__class__(root, train=dataset.train, transform=dataset.transform, base_set=val_set)
     test_set = dataset.__class__(root, train=dataset.train, transform=dataset.transform, base_set=test_set)
     return val_set, test_set
-    
+
 
 def save_model(model, save_path):
     sd = model.state_dict()
@@ -1001,7 +999,7 @@ def load_model(model, save_path, model_device='cuda'):
     sd = torch.load(save_path, map_location=torch.device(model_device))
     model.load_state_dict(sd)
     return model
-    
+
 def read_yaml(path):
     with open(path) as handle:
         try:
@@ -1018,18 +1016,18 @@ def inject_pair(config, pair, ignore_bases=False):
         config['model']['bases'] = [os.path.join(config['model']['dir'], split, f'{model_name}_v0.pth.tar') for split in pair]
     return config
 
-    
+
 def get_contour_grid(models: Sequence, eval_fn: Callable, n_points_row: int = 10, n_points_col: int= 10, basis: Sequence = None, scale_row: float = None, scale_col: float = None):
   """
-  Function taking in a sequence of models and creating a grid 
-  representing interpolations between the models, along with 
-  the locations of the original models, in their given order 
+  Function taking in a sequence of models and creating a grid
+  representing interpolations between the models, along with
+  the locations of the original models, in their given order
   on the returned grid.
   Heavily inspired by Stanislav Fort's code at https://github.com/stanislavfort/dissect-git-re-basin,
   exteded to work in the n-models case. Expects the n models to be closely projectable to a 2D space.
 
     Args:
-        models: a sequence of model state dicts, need 3 models 
+        models: a sequence of model state dicts, need 3 models
         minimum if no basis is given
         eval_fn: a function taking in a model state dict and
             returning the evaluation of the model at that point
@@ -1037,8 +1035,8 @@ def get_contour_grid(models: Sequence, eval_fn: Callable, n_points_row: int = 10
             of the grid. The total number of points will be n_points**2
         basis: a sequence of unit vectors, each of the same length as
             the flattened model, representing the basis vectors to use
-            for the interpolation. If not given, the first two principal 
-            axis of the list of models will be used. 
+            for the interpolation. If not given, the first two principal
+            axis of the list of models will be used.
         scale_row: a float representing the scale of the basis vectors in row direction.
         scale_col: a float representing the scale of the basis vectors in col direction.
     Returns:
@@ -1052,7 +1050,7 @@ def get_contour_grid(models: Sequence, eval_fn: Callable, n_points_row: int = 10
             "basis": the basis vectors used for the interpolation
             "scale": the scale of the basis vectors
         }
-  
+
   """
   # reconstructing parameter dictionaries from flat vectors
   def reconstruct(vector, example_flat_model, keys):
@@ -1113,5 +1111,5 @@ def get_contour_grid(models: Sequence, eval_fn: Callable, n_points_row: int = 10
       new_flat_v = origin_vector + basis[0]*t1*scale_row + basis[1]*t2*scale_col
       reconstructed_flat = reconstruct(new_flat_v, models[0], keys)
       grid_acc[i1,i2], grid_loss[i1,i2] = eval_fn(reconstructed_flat)
-  
+
   return {"grid_acc": grid_acc, "grid_loss": grid_loss, "model_locations": model_locations, "tick_rows": t1s, "tick_cols": t2s, "basis": basis, "scale_row": scale_row, "scale_col": scale_col}
